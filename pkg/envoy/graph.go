@@ -73,10 +73,10 @@ func (g *Graph) Remove(nn ...Node) {
 	g.conflicts.Remove(rn...)
 }
 
-// FindNode returns all nodes that match the given resource and identifiers
-func (g *Graph) FindNode(res string, ii ...string) []Node {
-	return g.nodes.FilterByIdentifiers(res, ii...)
-}
+//FindNode returns all nodes that match the given resource and identifiers
+//func (g *Graph) FindNode(res string, ii ...string) []Node {
+//	return g.nodes.FilterByIdentifiers(res, ii...)
+//}
 
 // Invert inverts the graph
 //
@@ -88,46 +88,45 @@ func (g *Graph) Invert() {
 // Children provides node n child nodes **excluding** processed nodes
 func (g *Graph) Children(n Node) []Node {
 	if !g.invert {
-		return g.removeProcessedNodes(g.children(n))
+		return g.nodes.ChildrenOf(n, unprocessed)
 	}
-	return g.removeProcessedNodes(g.parents(n))
+
+	return g.nodes.ParentsOf(n, unprocessed)
 }
 
 // ChildrenA provides node n child nodes **including** processed nodes
 func (g *Graph) ChildrenA(n Node) []Node {
 	if !g.invert {
-		return g.children(n)
+		return g.nodes.ChildrenOf(n, all)
 	}
-	return g.parents(n)
+
+	return g.nodes.ParentsOf(n, all)
 }
 
 // Parents provides node n parent nodes **excluding** processed nodes
 func (g *Graph) Parents(n Node) []Node {
 	if !g.invert {
-		return g.removeProcessedNodes(g.parents(n))
+		return g.nodes.ParentsOf(n, unprocessed)
 	}
-	return g.removeProcessedNodes(g.children(n))
+	return g.nodes.ChildrenOf(n, unprocessed)
 }
 
 // ParentsA provides node n parent nodes **including** processed nodes
 func (g *Graph) ParentsA(n Node) []Node {
 	if !g.invert {
-		return g.parents(n)
+		return g.nodes.ParentsOf(n, all)
 	}
-	return g.children(n)
+	return g.nodes.ChildrenOf(n, all)
 }
 
 // ParentsAC provides node n parent nodes **including** processed nodes, **excluding** conflicting nodes
 func (g *Graph) ParentsAC(n Node) []Node {
-	pp := g.Parents(n)
-	mm := make([]Node, 0, int(math.Max(float64(len(pp)-len(g.conflicts.set)), 1.0)))
-	for _, p := range pp {
-		if !g.conflicts.Has(p) {
-			mm = append(mm, p)
-		}
-	}
+	mask := processed & pending
 
-	return mm
+	if !g.invert {
+		return g.nodes.ParentsOf(n, mask)
+	}
+	return g.nodes.ChildrenOf(n, mask)
 }
 
 // Validate performs a basic data validation over all the nodes.
@@ -137,16 +136,16 @@ func (g *Graph) Validate() error {
 	return nil
 }
 
-// Nodes returns all unprocessed nodes in the given graph g
-func (g *Graph) Nodes() []Node {
-	nn := make([]Node, 0, len(g.nodes.set))
-	for _, n := range g.nodes.set {
-		if n != nil && !g.processed.Has(n) {
-			nn = append(nn, n)
-		}
-	}
-	return nn
-}
+//// Nodes returns all unprocessed nodes in the given graph g
+//func (g *Graph) Nodes() []Node {
+//	nn := make([]Node, 0, 1024)
+//	for _, n := range g.nodes.set {
+//		if n != nil && !g.processed.Has(n) {
+//			nn = append(nn, n)
+//		}
+//	}
+//	return nn
+//}
 
 // Next provides the next node that should be processed (inclide the nodes context)
 //
@@ -155,7 +154,23 @@ func (g *Graph) Nodes() []Node {
 //  * If there is a node with no parent nodes; select that as the next node.
 //  * If there is no node with no parent nodes; determine a conflicting node.
 //    This returns the conflicting node n, it's parents, it's children and an ErrorDependencyConflict.
-func (g *Graph) Next(ctx context.Context) (n Node, pp []Node, cc []Node, err error) {
+func (g *Graph) Next() (n Node, pp []Node, cc []Node, err error) {
+	if n = g.nodes.Shift(pending); n != nil {
+		cc = g.Children(n)
+		pp = g.ParentsA(n)
+		g.markProcessed(n)
+		g.Remove(g.ParentsA(n)...)
+		g.Remove(n)
+
+		return n, pp, cc, nil
+	}
+
+	if n = g.nodes.Shift(conflicting); n != nil {
+
+	}
+}
+
+func (g *Graph) __Next(ctx context.Context) (n Node, pp []Node, cc []Node, err error) {
 	if len(g.Nodes()) <= 0 {
 		return nil, nil, nil, nil
 	}
@@ -224,45 +239,45 @@ func (g *Graph) markConflicting(n Node) {
 	g.conflicts.Add(n)
 }
 
-func (g *Graph) removeProcessedNodes(nn []Node) []Node {
-	mm := make([]Node, 0, len(nn))
-	for _, n := range nn {
-		if !g.processed.Has(n) {
-			mm = append(mm, n)
-		}
-	}
-	return mm
-}
-
-func (g *Graph) children(n Node) []Node {
-	nn := make([]Node, 0)
-	// A simple find all nodes that n is in a relationship with will do the trick
-	for res, IDs := range n.Relations() {
-		nn = append(nn, g.FindNode(res, IDs...)...)
-	}
-
-	return nn
-}
-
-func (g *Graph) parents(n Node) []Node {
-	return g.nodes.FilterRelationshipsWith(n)
-
-	//nn := make([]Node, 0)
-	//
-	//// A more complex, find all nodes that have n in their relationship.
-	//// @note can we make this nicer?
-	//for _, m := range g.nodes.set {
-	//	r := m.Relations()
-	//	if len(r) == 0 {
-	//		continue
-	//	}
-	//
-	//	if IDs, has := r[n.Resource()]; has {
-	//		if match(n, m.Resource(), IDs...) {
-	//			nn = append(nn, m)
-	//		}
-	//	}
-	//}
-	//
-	//return nn
-}
+//func (g *Graph) removeProcessedNodes(nn []Node) []Node {
+//	mm := make([]Node, 0, len(nn))
+//	for _, n := range nn {
+//		if !g.processed.Has(n) {
+//			mm = append(mm, n)
+//		}
+//	}
+//	return mm
+//}
+//
+//func (g *Graph) children(n Node) []Node {
+//	nn := make([]Node, 0)
+//	// A simple find all nodes that n is in a relationship with will do the trick
+//	for res, IDs := range n.Relations() {
+//		nn = append(nn, g.FindNode(res, IDs...)...)
+//	}
+//
+//	return nn
+//}
+//
+//func (g *Graph) parents(n Node) []Node {
+//	return g.nodes.FilterRelationshipsWith(n)
+//
+//	//nn := make([]Node, 0)
+//	//
+//	//// A more complex, find all nodes that have n in their relationship.
+//	//// @note can we make this nicer?
+//	//for _, m := range g.nodes.set {
+//	//	r := m.Relations()
+//	//	if len(r) == 0 {
+//	//		continue
+//	//	}
+//	//
+//	//	if IDs, has := r[n.Resource()]; has {
+//	//		if match(n, m.Resource(), IDs...) {
+//	//			nn = append(nn, m)
+//	//		}
+//	//	}
+//	//}
+//	//
+//	//return nn
+//}

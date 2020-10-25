@@ -39,6 +39,8 @@ type (
 		Matches(resource string, identifiers ...string) bool
 	}
 
+	state int8
+
 	// NodeSet is a set of Nodes
 	NodeSet struct {
 		set []Node
@@ -49,6 +51,12 @@ type (
 		// rr - node relationship index
 		rIndex map[string]map[string][]int
 
+		// node state index
+		sIndex map[int]state
+
+		// count per state
+		sCount map[state]int
+
 		// record empty spots
 		holes []int
 	}
@@ -58,6 +66,20 @@ type (
 
 	// NodeIdentifiers represents a set of node identifiers
 	NodeIdentifiers []string
+)
+
+const (
+	nodeInitCap = 2 << 16
+)
+
+const (
+	pending state = 1 << iota
+	conflicting
+	conflictingParents
+	processed
+
+	all         = processed & pending & conflicting & conflictingParents
+	unprocessed = pending & conflicting & conflictingParents
 )
 
 // Add adds a new identifier for the given resource
@@ -100,6 +122,23 @@ func (ii NodeIdentifiers) HasAny(jj ...string) bool {
 	return false
 }
 
+func NewNodeSet() *NodeSet {
+	var (
+		secCap = 128
+	)
+
+	set := &NodeSet{
+		set:    make([]Node, nodeInitCap),
+		index:  make(map[string]map[string]int),
+		rIndex: make(map[string]map[string][]int),
+		sIndex: make(map[int]state),
+		sCount: make(map[state]int),
+		holes:  make([]int, secCap),
+	}
+
+	return set
+}
+
 func (ss *NodeSet) Add(nn ...Node) {
 	var index int
 	for _, n := range nn {
@@ -112,25 +151,93 @@ func (ss *NodeSet) Add(nn ...Node) {
 			index = len(ss.set)
 			ss.set = append(ss.set, n)
 		} else {
+			// filling holes created by Remove fn.
 			index, ss.holes = ss.holes[0], ss.holes[1:]
 			ss.set[index] = n
 		}
 
+		ss.sIndex[index] = pending
+		ss.sCount[pending]++
+
 		ss.reindex(n, index, nil, nil)
+
+		// @todo update statuses of all referenced nodes to conflicting
 	}
 }
 
 func (ss *NodeSet) Remove(nn ...Node) {
 	var index int
+	var oldState state
 	for _, n := range nn {
 		if index = ss.indexOf(n); index == -1 {
 			// skip non existing
 			continue
 		}
+		oldState = ss.sIndex[index]
+		ss.sCount[oldState]--
 
 		ss.set[index] = nil
+		ss.sIndex[index] = pending
+
 		ss.reindex(n, -1, n.Identifiers(), n.Relations())
 		ss.holes = append(ss.holes, index)
+	}
+}
+
+// Changes node state, adjusts counters and returns old state
+func (ss *NodeSet) SetState(index int, s state) state {
+	var (
+		old = ss.sIndex[index]
+	)
+
+	if old != s {
+		ss.sCount[old]--
+		ss.sCount[pending]++
+		ss.sIndex[index] = s
+	}
+
+	// @todo if new status is processed, update to all
+	//       conflicting referenced nodes to pending
+
+	return old
+}
+
+func (ss NodeSet) Count(s state) int {
+	return ss.sCount[s]
+}
+
+// returns next node with compatible state and flips state of that node to processed
+func (ss NodeSet) Shift(s state) Node {
+	for i, n := range ss.set {
+		if n == nil {
+			// skip deleted
+			continue
+		}
+
+		if ss.sIndex[i] != s {
+			// skip nodes in different state
+			continue
+		}
+
+		ss.SetState(i, processed)
+		return n
+	}
+
+	return nil
+}
+
+// EachValid calls fn() for every valid node
+func (ss NodeSet) Each(s state, fn func(Node, int)) {
+	for i, n := range ss.set {
+		if n == nil {
+			continue
+		}
+
+		if ss.sIndex[i] != s {
+			continue
+		}
+
+		fn(n, i)
 	}
 }
 
@@ -138,10 +245,6 @@ func (ss *NodeSet) reindex(n Node, index int, oldIdentifiers []string, oldRelati
 	var (
 		r = n.Resource()
 	)
-
-	if ss.index == nil {
-		ss.index = make(map[string]map[string]int)
-	}
 
 	if _, has := ss.index[r]; !has {
 		ss.index[r] = make(map[string]int)
@@ -205,7 +308,7 @@ func (ss NodeSet) Has(n Node) bool {
 // Finds all matching nodes
 //
 // 1st check is done on index directly and then we recheck it directly on the node
-func (ss NodeSet) FilterByIdentifiers(r string, ii ...string) []Node {
+func (ss NodeSet) filter(mask state, r string, ii ...string) []Node {
 	nn := make([]Node, 0, len(ii))
 
 	if len(ss.index) == 0 && len(ss.index[r]) == 0 {
@@ -223,6 +326,11 @@ func (ss NodeSet) FilterByIdentifiers(r string, ii ...string) []Node {
 			continue
 		}
 
+		if ss.sIndex[index]&mask > 0 {
+			// index does not match
+			continue
+		}
+
 		// recheck the node
 		if match(ss.set[index], r, ii...) {
 			nn = append(nn, ss.set[index])
@@ -232,18 +340,16 @@ func (ss NodeSet) FilterByIdentifiers(r string, ii ...string) []Node {
 	return nn
 }
 
-// Finds all matching nodes
-//
-// 1st check is done on index directly and then we recheck it directly on the node
-func (ss NodeSet) FilterRelationshipsWith(n Node) []Node {
-	results := make([]Node, 0)
+// Find all patent nodes
+func (ss NodeSet) ParentsOf(n Node, mask state) []Node {
+	parents := make([]Node, 0)
 
 	if n == nil {
 		panic("filtering with empty node")
 	}
 
 	if len(ss.rIndex) == 0 || len(ss.rIndex[n.Resource()]) == 0 {
-		return results
+		return parents
 	}
 
 	// iterate through all node's identifiers
@@ -253,16 +359,33 @@ func (ss NodeSet) FilterRelationshipsWith(n Node) []Node {
 		}
 
 		for _, index := range ss.rIndex[n.Resource()][fi] {
-			if ss.set[index] == nil {
+			if ss.sIndex[index]&mask > 0 {
+				// index does not match
 				continue
 			}
 
-			// candidate
-			results = append(results, ss.set[index])
+			if ss.set[index] == nil {
+				// removed
+				continue
+			}
+
+			// match
+			parents = append(parents, ss.set[index])
 		}
 	}
 
-	return results
+	return parents
+}
+
+// Finds all child nodes
+func (ss NodeSet) ChildrenOf(n Node, mask state) []Node {
+	children := make([]Node, 0)
+
+	for r, ii := range n.Relations() {
+		children = append(children, ss.filter(mask, r, ii...)...)
+	}
+
+	return children
 }
 
 // Finds node index
