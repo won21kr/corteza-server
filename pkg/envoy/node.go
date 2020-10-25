@@ -7,9 +7,6 @@ import (
 type (
 	// Node defines the signature of any valid graph node
 	Node interface {
-		// Matches checks if the node matches the given resources and **any** of the identifiers.
-		Matches(resource string, identifiers ...string) bool
-
 		// Identifiers returns a set of values that identify the node.
 		//
 		// The identifiers may **not** be unique across all resources, but
@@ -37,8 +34,24 @@ type (
 		Update(...Node)
 	}
 
+	nodeMatcher interface {
+		// Matches checks if the node matches the given resources and **any** of the identifiers.
+		Matches(resource string, identifiers ...string) bool
+	}
+
 	// NodeSet is a set of Nodes
-	NodeSet []Node
+	NodeSet struct {
+		set []Node
+
+		// node index per resource types and identifiers
+		index map[string]map[string]int
+
+		// rr - node relationship index
+		rIndex map[string]map[string][]int
+
+		// record empty spots
+		holes []int
+	}
 
 	// NodeRelationships holds relationships for a specific node
 	NodeRelationships map[string]NodeIdentifiers
@@ -76,46 +89,201 @@ func (ii NodeIdentifiers) Add(idents ...string) NodeIdentifiers {
 
 // HasAny checks if any of the provided identifiers appear in the given set of identifiers
 func (ii NodeIdentifiers) HasAny(jj ...string) bool {
-	m := slice.ToStringBoolMap(ii)
-
-	for _, j := range jj {
-		if m[j] {
-			return true
+	for _, i := range ii {
+		for _, j := range jj {
+			if i == j {
+				return true
+			}
 		}
 	}
 
 	return false
 }
 
-// Has checks if the given NodeSet contains a specific Node
-func (ss NodeSet) Has(n Node) bool {
-	has := false
-	for _, s := range ss {
-		mRes := n.Resource()
-		mIdd := n.Identifiers()
+func (ss *NodeSet) Add(nn ...Node) {
+	var index int
+	for _, n := range nn {
+		if index = ss.indexOf(n); index != -1 {
+			// skip existing
+			continue
+		}
 
-		has = has || s.Matches(mRes, mIdd...)
+		if len(ss.holes) == 0 {
+			index = len(ss.set)
+			ss.set = append(ss.set, n)
+		} else {
+			index, ss.holes = ss.holes[0], ss.holes[1:]
+			ss.set[index] = n
+		}
+
+		ss.reindex(n, index, nil, nil)
 	}
-	return has
 }
 
-func (ss NodeSet) Remove(nn ...Node) NodeSet {
-	mm := make(NodeSet, 0, len(ss))
+func (ss *NodeSet) Remove(nn ...Node) {
+	var index int
+	for _, n := range nn {
+		if index = ss.indexOf(n); index == -1 {
+			// skip non existing
+			continue
+		}
 
-	if len(nn) <= 0 {
-		return ss
+		ss.set[index] = nil
+		ss.reindex(n, -1, n.Identifiers(), n.Relations())
+		ss.holes = append(ss.holes, index)
+	}
+}
+
+func (ss *NodeSet) reindex(n Node, index int, oldIdentifiers []string, oldRelations NodeRelationships) {
+	var (
+		r = n.Resource()
+	)
+
+	if ss.index == nil {
+		ss.index = make(map[string]map[string]int)
 	}
 
-	for _, s := range ss {
-		for _, n := range nn {
-			if s.Matches(n.Resource(), n.Identifiers()...) {
-				goto skip
+	if _, has := ss.index[r]; !has {
+		ss.index[r] = make(map[string]int)
+	}
+
+	if ss.rIndex == nil {
+		ss.rIndex = make(map[string]map[string][]int)
+	}
+
+	for _, i := range oldIdentifiers {
+		delete(ss.index[r], i)
+	}
+
+	// @todo cleanup oldRelations
+
+	if index > -1 {
+
+		for _, identifier := range n.Identifiers() {
+			ss.index[r][identifier] = index
+		}
+
+		for r, ii := range n.Relations() {
+			if _, has := ss.rIndex[r]; !has {
+				ss.rIndex[r] = make(map[string][]int)
+			}
+
+			for _, i := range ii {
+
+				has := false
+				for _, e := range ss.rIndex[r][i] {
+					if e == index {
+						has = true
+						break
+					}
+				}
+
+				if !has {
+					ss.rIndex[r][i] = append(ss.rIndex[r][i], index)
+				}
 			}
 		}
-		mm = append(mm, s)
+	}
+}
 
-	skip:
+// Has checks if the given NodeSet contains a specific Node
+func (ss NodeSet) Has(n Node) bool {
+	if n == nil {
+		return false
 	}
 
-	return mm
+	if i := ss.indexOf(n); i > -1 {
+		return ss.set[i] != nil
+		//m := ss.set[i]
+		// @todo if it does not match, we'll probably have to recalculate
+		//return match(n, m.Resource(), m.Identifiers()...)
+	}
+
+	return false
+}
+
+// Finds all matching nodes
+//
+// 1st check is done on index directly and then we recheck it directly on the node
+func (ss NodeSet) FilterByIdentifiers(r string, ii ...string) []Node {
+	nn := make([]Node, 0, len(ii))
+
+	if len(ss.index) == 0 && len(ss.index[r]) == 0 {
+		return nn
+	}
+
+	for _, i := range ii {
+		index, has := ss.index[r][i]
+		if !has {
+			continue
+		}
+
+		if ss.set[index] == nil {
+			// index pointing to removed node
+			continue
+		}
+
+		// recheck the node
+		if match(ss.set[index], r, ii...) {
+			nn = append(nn, ss.set[index])
+		}
+	}
+
+	return nn
+}
+
+// Finds all matching nodes
+//
+// 1st check is done on index directly and then we recheck it directly on the node
+func (ss NodeSet) FilterRelationshipsWith(n Node) []Node {
+	results := make([]Node, 0)
+
+	if n == nil {
+		panic("filtering with empty node")
+	}
+
+	if len(ss.rIndex) == 0 || len(ss.rIndex[n.Resource()]) == 0 {
+		return results
+	}
+
+	// iterate through all node's identifiers
+	for _, fi := range n.Identifiers() {
+		if len(ss.rIndex[n.Resource()][fi]) == 0 {
+			continue
+		}
+
+		for _, index := range ss.rIndex[n.Resource()][fi] {
+			if ss.set[index] == nil {
+				continue
+			}
+
+			// candidate
+			results = append(results, ss.set[index])
+		}
+	}
+
+	return results
+}
+
+// Finds node index
+func (ss NodeSet) indexOf(n Node) int {
+	var r = n.Resource()
+	if len(ss.index) > 0 && len(ss.index[r]) > 0 {
+		for _, i := range n.Identifiers() {
+			if index, has := ss.index[r][i]; has {
+				return index
+			}
+		}
+	}
+
+	return -1
+}
+
+func match(n Node, res string, ii ...string) bool {
+	if matcher, is := n.(nodeMatcher); is {
+		// Handle custom matchers
+		return matcher.Matches(res, ii...)
+	}
+
+	return n.Resource() == res && n.Identifiers().HasAny(ii...)
 }

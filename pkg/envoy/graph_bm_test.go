@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
 type (
@@ -23,9 +21,6 @@ func (n pNode) Resource() string             { return "parent" }
 func (n pNode) Relations() NodeRelationships { return n.rr }
 func (n pNode) Identifiers() NodeIdentifiers { return n.ii }
 func (n *pNode) Update(nn ...Node)           {}
-func (n pNode) Matches(r string, ii ...string) bool {
-	return r == n.Resource() && n.Identifiers().HasAny(ii...)
-}
 
 func (n cNode) Resource() string             { return "child" }
 func (n cNode) Relations() NodeRelationships { return n.rr }
@@ -38,9 +33,6 @@ func (n *cNode) Update(rr ...Node) {
 		}
 	}
 }
-func (n cNode) Matches(r string, ii ...string) bool {
-	return r == n.Resource() && n.Identifiers().HasAny(ii...)
-}
 
 // Run with:
 //  go test -v -benchmem -cpuprofile cpu.out -bench DepRes  ./pkg/envoy/*.go
@@ -48,26 +40,39 @@ func (n cNode) Matches(r string, ii ...string) bool {
 //  go tool pprof cpu.out
 //  (pprof) list Next
 //  (pprof) ...
-func BenchmarkGraph_DepResolution(b *testing.B) {
+func BenchmarkGraph_Next(b *testing.B) {
+	b.ReportAllocs()
+
 	var (
-		g   = NewGraph()
-		req = require.New(b)
+		minNodes   = getEnvInt("MIN_NODES", 100)
+		maxNodes   = getEnvInt("MAX_NODES", 100000000)
+		stepFactor = getEnvInt("STEP_FACTOR", 10)
 	)
 
-	println(b.N)
+	for nodes := minNodes; nodes <= maxNodes; nodes *= stepFactor {
+		b.Run(fmt.Sprintf("%d", nodes), func(b *testing.B) {
+			var g = NewGraph()
+			g.Add(&pNode{ii: NodeIdentifiers{"p0"}})
+			g.Add(&pNode{ii: NodeIdentifiers{"p1"}})
+			g.Add(&pNode{ii: NodeIdentifiers{"p2"}})
+			g.Add(&pNode{ii: NodeIdentifiers{"p3"}})
 
-	g.Add(&pNode{ii: NodeIdentifiers{"p0"}})
-	g.Add(&pNode{ii: NodeIdentifiers{"p1"}})
-	g.Add(&pNode{ii: NodeIdentifiers{"p2"}})
-	g.Add(&pNode{ii: NodeIdentifiers{"p3"}})
+			for n := 0; n < nodes; n++ {
+				g.Add(&cNode{
+					ii: NodeIdentifiers{fmt.Sprintf("c%d", n)},
+					rr: NodeRelationships{pNode{}.Resource(): NodeIdentifiers{fmt.Sprintf("p%d", n%4)}},
+				})
+			}
 
-	for n := 0; n < b.N; n++ {
-		g.Add(&cNode{
-			ii: NodeIdentifiers{fmt.Sprintf("c%d", n)},
-			rr: NodeRelationships{pNode{}.Resource(): NodeIdentifiers{fmt.Sprintf("p%d", n%4)}},
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				b.ReportMetric(float64(len(g.nodes.set)), "nodes")
+
+				if Encode(context.Background(), g) != nil {
+					b.FailNow()
+				}
+			}
 		})
 	}
 
-	b.ResetTimer()
-	req.NoError(Encode(context.Background(), g))
 }

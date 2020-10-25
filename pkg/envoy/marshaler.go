@@ -14,7 +14,7 @@ type (
 func CollectNodes(ii ...interface{}) (nn []Node, err error) {
 	for _, i := range ii {
 		switch c := i.(type) {
-		case NodeSet:
+		case []Node:
 			nn = append(nn, c...)
 		case Node:
 			nn = append(nn, c)

@@ -38,9 +38,9 @@ var (
 // making one yourself.
 func NewGraph() *Graph {
 	return &Graph{
-		conflicts: make(NodeSet, 0, 100),
-		processed: make(NodeSet, 0, 100),
-		nodes:     make([]Node, 0, 100),
+		conflicts: NodeSet{},
+		processed: NodeSet{},
+		nodes:     NodeSet{},
 		invert:    false,
 	}
 }
@@ -50,7 +50,7 @@ func NewGraph() *Graph {
 // The method doesn't do any existence checks for duplicates.
 // It simply pushes the provided nodes.
 func (g *Graph) Add(nn ...Node) {
-	g.nodes = append(g.nodes, nn...)
+	g.nodes.Add(nn...)
 }
 
 // Remove removes the set of nodes nn from the graph h
@@ -61,28 +61,21 @@ func (g *Graph) Remove(nn ...Node) {
 		return
 	}
 
-	rn := make(NodeSet, 0, len(nn))
+	rn := make([]Node, 0, len(nn))
 	for _, n := range nn {
 		if g.canRemove(n) {
 			rn = append(rn, n)
 		}
 	}
 
-	g.nodes = g.nodes.Remove(rn...)
-	g.processed = g.processed.Remove(rn...)
-	g.conflicts = g.conflicts.Remove(rn...)
+	g.nodes.Remove(rn...)
+	g.processed.Remove(rn...)
+	g.conflicts.Remove(rn...)
 }
 
 // FindNode returns all nodes that match the given resource and identifiers
-func (g *Graph) FindNode(res string, identifiers ...string) []Node {
-	nn := make([]Node, 0, len(identifiers))
-	for _, n := range g.nodes {
-		if n.Matches(res, identifiers...) {
-			nn = append(nn, n)
-		}
-	}
-
-	return nn
+func (g *Graph) FindNode(res string, ii ...string) []Node {
+	return g.nodes.FilterByIdentifiers(res, ii...)
 }
 
 // Invert inverts the graph
@@ -116,7 +109,7 @@ func (g *Graph) Parents(n Node) []Node {
 	return g.removeProcessedNodes(g.children(n))
 }
 
-// ParentsA provides node n parent nodes **incliding** processed nodes
+// ParentsA provides node n parent nodes **including** processed nodes
 func (g *Graph) ParentsA(n Node) []Node {
 	if !g.invert {
 		return g.parents(n)
@@ -127,7 +120,7 @@ func (g *Graph) ParentsA(n Node) []Node {
 // ParentsAC provides node n parent nodes **including** processed nodes, **excluding** conflicting nodes
 func (g *Graph) ParentsAC(n Node) []Node {
 	pp := g.Parents(n)
-	mm := make([]Node, 0, int(math.Max(float64(len(pp)-len(g.conflicts)), 1.0)))
+	mm := make([]Node, 0, int(math.Max(float64(len(pp)-len(g.conflicts.set)), 1.0)))
 	for _, p := range pp {
 		if !g.conflicts.Has(p) {
 			mm = append(mm, p)
@@ -146,9 +139,9 @@ func (g *Graph) Validate() error {
 
 // Nodes returns all unprocessed nodes in the given graph g
 func (g *Graph) Nodes() []Node {
-	nn := make([]Node, 0, len(g.nodes))
-	for _, n := range g.nodes {
-		if !g.processed.Has(n) {
+	nn := make([]Node, 0, len(g.nodes.set))
+	for _, n := range g.nodes.set {
+		if n != nil && !g.processed.Has(n) {
 			nn = append(nn, n)
 		}
 	}
@@ -207,15 +200,8 @@ func (g *Graph) Next(ctx context.Context) (n Node, pp []Node, cc []Node, err err
 // Helper methods
 // ------------------------------------------------------------------------
 
-func (g *Graph) nodesMatch(n, m Node) bool {
-	mRes := m.Resource()
-	mIdd := m.Identifiers()
-
-	return n.Matches(mRes, mIdd...)
-}
-
 func (g *Graph) canRemove(n Node) bool {
-	if len(g.nodes) <= 1 {
+	if len(g.nodes.set) <= 1 {
 		return true
 	}
 
@@ -230,26 +216,12 @@ func (g *Graph) canRemove(n Node) bool {
 }
 
 func (g *Graph) markProcessed(nn ...Node) {
-	if g.processed == nil {
-		g.processed = make(NodeSet, 0, len(nn))
-	}
-
-	for _, n := range nn {
-		if !g.processed.Has(n) {
-			g.processed = append(g.processed, n)
-		}
-	}
+	g.processed.Add(nn...)
 }
 
 // helper to mark the node as a conflicting node
 func (g *Graph) markConflicting(n Node) {
-	if g.conflicts == nil {
-		g.conflicts = make(NodeSet, 0, 1)
-	}
-
-	if !g.conflicts.Has(n) {
-		g.conflicts = append(g.conflicts, n)
-	}
+	g.conflicts.Add(n)
 }
 
 func (g *Graph) removeProcessedNodes(nn []Node) []Node {
@@ -273,22 +245,24 @@ func (g *Graph) children(n Node) []Node {
 }
 
 func (g *Graph) parents(n Node) []Node {
-	nn := make([]Node, 0)
+	return g.nodes.FilterRelationshipsWith(n)
 
-	// A more complex, find all nodes that have n in their relationship.
-	// @note can we make this nicer?
-	for _, m := range g.nodes {
-		r := m.Relations()
-		if r == nil {
-			continue
-		}
-
-		if IDs, has := r[n.Resource()]; has {
-			if n.Matches(n.Resource(), IDs...) {
-				nn = append(nn, m)
-			}
-		}
-	}
-
-	return nn
+	//nn := make([]Node, 0)
+	//
+	//// A more complex, find all nodes that have n in their relationship.
+	//// @note can we make this nicer?
+	//for _, m := range g.nodes.set {
+	//	r := m.Relations()
+	//	if len(r) == 0 {
+	//		continue
+	//	}
+	//
+	//	if IDs, has := r[n.Resource()]; has {
+	//		if match(n, m.Resource(), IDs...) {
+	//			nn = append(nn, m)
+	//		}
+	//	}
+	//}
+	//
+	//return nn
 }
