@@ -27,7 +27,6 @@ type (
 )
 
 func NewOptions() *Options {
-
 	return &Options{
 		Environment: *options.Environment(),
 		ActionLog:   *options.ActionLog(),
