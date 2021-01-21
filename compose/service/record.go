@@ -118,12 +118,19 @@ type (
 	}
 
 	RecordImportProgress struct {
-		StartedAt  *time.Time `json:"startedAt"`
-		FinishedAt *time.Time `json:"finishedAt"`
-		EntryCount uint64     `json:"entryCount"`
-		Completed  uint64     `json:"completed"`
-		Failed     uint64     `json:"failed"`
-		FailReason string     `json:"failReason,omitempty"`
+		StartedAt  *time.Time   `json:"startedAt"`
+		FinishedAt *time.Time   `json:"finishedAt"`
+		EntryCount uint64       `json:"entryCount"`
+		Completed  uint64       `json:"completed"`
+		Failed     uint64       `json:"failed"`
+		FailReason string       `json:"failReason,omitempty"`
+		FailLog    []*FailEntry `json:"failLog,omitempty"`
+	}
+
+	FailEntry struct {
+		Index  uint          `json:"index,string"`
+		Record *types.Record `json:"record"`
+		Error  []string      `json:"error"`
 	}
 )
 
@@ -374,15 +381,45 @@ func (svc record) Import(ses *RecordImportSession, ssvc ImportSessionService) (e
 		ses.Progress.StartedAt = &sa
 		ssvc.SetByID(svc.ctx, ses.SessionID, 0, 0, nil, &ses.Progress, nil)
 
-		err = ses.Decoder.Records(ses.Fields, func(mod *types.Record) error {
-			mod.NamespaceID = ses.NamespaceID
-			mod.ModuleID = ses.ModuleID
-			mod.OwnedBy = ses.UserID
+		index := uint(0)
+		err = ses.Decoder.Records(ses.Fields, func(rec *types.Record) error {
+			index++
 
-			_, err := svc.Create(mod)
+			rec.NamespaceID = ses.NamespaceID
+			rec.ModuleID = ses.ModuleID
+			rec.OwnedBy = ses.UserID
+
+			_, err := svc.Create(rec)
 			if err != nil {
+				recErr, isRecErr := err.(*recordError)
+
 				ses.Progress.Failed++
 				ses.Progress.FailReason = err.Error()
+
+				if ses.Progress.FailLog == nil {
+					ses.Progress.FailLog = make([]*FailEntry, 0, 10)
+				}
+
+				fe := &FailEntry{
+					Record: rec,
+					Index:  index,
+				}
+
+				if isRecErr {
+					if evErr, ok := recErr.wrap.(*types.RecordValueErrorSet); ok {
+						for _, ve := range evErr.Set {
+							for k, v := range ve.Meta {
+								fe.Error = append(fe.Error, fmt.Sprintf("%s %s %v", ve.Kind, k, v))
+							}
+						}
+					} else {
+						fe.Error = append(fe.Error, err.Error())
+					}
+				} else {
+					fe.Error = append(fe.Error, err.Error())
+				}
+
+				ses.Progress.FailLog = append(ses.Progress.FailLog, fe)
 
 				if ses.OnError == IMPORT_ON_ERROR_FAIL {
 					fa := time.Now()
